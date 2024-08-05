@@ -63,7 +63,23 @@ impl HTTPRequest {
 
         // Read the optional body
         if let Some(length_str) = self.headers.get("Content-Length") {
+            /*
+            let length: usize = match length_str.parse() {
+                Ok(len) => len,
+                Err(e) => return Err(format!("Error parsing Content-Length: {}", e)),
+            };
 
+            let mut body = vec![0; length];
+            if let Err(e) = reader.read_exact(&mut body) {
+                return Err(format!("Error reading body: {}", e));
+            }
+
+            self.body = match String::from_utf8(body) {
+                Ok(body_str) => Some(body_str),
+                Err(e) => return Err(format!("Error parsing body as UTF-8: {}", e)),
+            };
+            */
+            self.body = None;
         } else {
             self.body = None;
         }
@@ -74,17 +90,39 @@ impl HTTPRequest {
 
 fn write_response(request: &HTTPRequest, stream: &mut TcpStream) -> Result<(), std::io::Error> {
     //By default this will be the default response
+    let is_echo_req: bool = request.path.as_str().starts_with("/echo");
+
     let (status_code, status_msg) = match request.path.as_str() { 
         "/" => (200, "OK"),
+        s if s.starts_with("/echo") => (200, "OK"),
         _ => (404, "Not Found"),
     };
 
-    let response = format!(
-        "{} {} {}\r\n\r\n",
+    let status = format!(
+        "{} {} {}\r\n",
         request.version,
         status_code, 
         status_msg,
     );
+
+    let mut response = status.to_string();
+    let body = request.path.as_str().trim_start_matches("/echo/");
+
+    if is_echo_req {
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type", "text/plain".to_string());
+        headers.insert("Content-Length", body.len().to_string());
+    
+    
+        for (key, value) in headers {
+            response.push_str(&format!("{}: {}\r\n" ,key, value));
+        }
+        //println!("{}", response);
+    }
+
+    response.push_str("\r\n");
+    response.push_str(body);
+
     stream.write_all(response.as_bytes())?;
     Ok(())
 }
