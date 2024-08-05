@@ -63,22 +63,7 @@ impl HTTPRequest {
 
         // Read the optional body
         if let Some(length_str) = self.headers.get("Content-Length") {
-            /*
-            let length: usize = match length_str.parse() {
-                Ok(len) => len,
-                Err(e) => return Err(format!("Error parsing Content-Length: {}", e)),
-            };
 
-            let mut body = vec![0; length];
-            if let Err(e) = reader.read_exact(&mut body) {
-                return Err(format!("Error reading body: {}", e));
-            }
-
-            self.body = match String::from_utf8(body) {
-                Ok(body_str) => Some(body_str),
-                Err(e) => return Err(format!("Error parsing body as UTF-8: {}", e)),
-            };
-            */
         } else {
             self.body = None;
         }
