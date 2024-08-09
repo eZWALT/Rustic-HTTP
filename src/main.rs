@@ -1,8 +1,8 @@
 use std::net::{TcpListener, TcpStream};
 use std::io::{Write, BufRead, BufReader, Read};
 use std::collections::HashMap;
+use std::thread;
 
-/*
 enum HTTPMethod {
     GET, 
     POST, 
@@ -15,18 +15,82 @@ enum ContentType {
     JSON,
 }
 
+impl HTTPMethod {
+    fn as_str(&self) -> &str {
+        match self {
+            HTTPMethod::GET => "GET",
+            HTTPMethod::POST => "POST",
+            HTTPMethod::PUT => "PUT",
+            HTTPMethod::DELETE => "DELETE",
+        }
+    }
+
+    fn from_str(method: &str) -> Option<Self> {
+        match method {
+            "GET" => Some(HTTPMethod::GET), 
+            "PUT" => Some(HTTPMethod::PUT), 
+            "POST" => Some(HTTPMethod::POST),
+            "DELETE" => Some(HTTPMethod::DELETE),
+            _ => None, 
+        }
+    }
+}
+
+impl ContentType {
+    fn as_str(&self) -> &str {
+        match self {
+            ContentType::PLAIN => "text/plain",
+            ContentType::JSON => "application/json",
+        }
+    }
+
+    fn from_str(content_type: &str) -> Option<ContentType> {
+        match content_type {
+            "text/plain" => Some(ContentType::PLAIN),
+            "application/json" => Some(ContentType::JSON),
+            _ => None
+        }
+    }
+}
+
+
 struct HTTPResponse {
     version: String,
     status_code: u16,
     status_msg: String, 
     headers: HashMap<String, String>,
     body: String,
-    content_ty: ContentType
+    content_type: ContentType
 }
-*/
+
+impl HTTPResponse {
+    fn new(version: String, status_code: u16, status_msg: String) -> Self {
+        HTTPResponse {
+            version,
+            status_code,
+            status_msg,
+            headers: HashMap::new(),
+            body: String::new(),
+            content_type: ContentType::PLAIN,
+        }
+    }
+
+    fn to_string(self) -> String {
+        let mut response = format!("{} {} {}\r\n", self.version, self.status_code, self.status_msg);
+
+        for (key, value) in self.headers {
+            response.push_str(&format!("{}: {}\r\n", key, value));
+        }
+
+        response.push_str("\r\n");
+        response.push_str(&self.body);
+
+        response
+    }
+}
 
 struct HTTPRequest {
-    method: String,
+    method: HTTPMethod,
     path: String,
     version: String,
     headers: HashMap<String, String>,
@@ -36,7 +100,7 @@ struct HTTPRequest {
 impl HTTPRequest {
     fn new() -> Self {
         HTTPRequest {
-            method: String::new(),
+            method: HTTPMethod::GET,
             path: String::new(),
             version: String::new(),
             headers: HashMap::new(),
@@ -57,7 +121,13 @@ impl HTTPRequest {
         if parts.len() != 3 {
             return Err("Invalid request line".to_string());
         }
-        self.method = parts[0].to_string();
+        if let Some(method) = HTTPMethod::from_str(parts[0]) {
+            self.method = method;
+        }
+        else {
+            return Err(format!("Invalid HTTP method: {}", parts[0]));
+        }
+        //These 2 parameters could use some rigorous checking
         self.path = parts[1].to_string();
         self.version = parts[2].to_string();
 
@@ -110,9 +180,9 @@ impl HTTPRequest {
     }
 }
 
-//This function encapsulates the behaviour of the HTTP server
-fn write_response(request: &HTTPRequest, stream: &mut TcpStream) -> Result<(), std::io::Error> {
-    //By default this will be the default response
+// This function encapsulates the behaviour of the HTTP server
+fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
+    // By default this will be the default response
     let path = request.path.as_str();
     let is_echo_endpoint: bool = path.starts_with("/echo");
     let is_agent_endpoint: bool = path.starts_with("/user-agent");
@@ -124,76 +194,75 @@ fn write_response(request: &HTTPRequest, stream: &mut TcpStream) -> Result<(), s
         _ => (404, "Not Found"),
     };
 
-    let status = format!(
-        "{} {} {}\r\n",
-        request.version,
-        status_code, 
-        status_msg,
+    let mut response = HTTPResponse::new(
+        request.version.clone(),
+        status_code,
+        status_msg.to_string(),
     );
 
-    let mut response = status.to_string();
-    let mut body = String::new();
-
     if is_echo_endpoint {
-        let mut headers = HashMap::new();
-        headers.insert("Content-Type", "text/plain".to_string());
-        body.push_str(path.trim_start_matches("/echo/"));
-        headers.insert("Content-Length", body.len().to_string());
-    
-        for (key, value) in &headers {
-            response.push_str(&format!("{}: {}\r\n" ,key, value));
-        }
-
-
-    }
+        response.content_type = ContentType::PLAIN;
+        response.headers.insert("Content-Type".to_string(), response.content_type.as_str().to_string());
+        response.body.push_str(path.trim_start_matches("/echo/"));
+    } 
     else if is_agent_endpoint {
-        let mut headers = HashMap::new();
-
-        headers.insert("Content-Type", "text/plain".to_string());
+        response.content_type = ContentType::PLAIN;
+        response.headers.insert("Content-Type".to_string(), response.content_type.as_str().to_string());
 
         if let Some(user_agent) = request.headers.get("User-Agent") {
-            headers.insert("User-Agent", user_agent.to_string());
-            let user_str: &str = user_agent.as_str();
-            body.push_str(user_str);
-            headers.insert("Content-Length", body.len().to_string());
-            
-            for (key, value) in &headers {
-                response.push_str(&format!("{}: {}\r\n" ,key, value));
-            }
-
+            response.body.push_str(user_agent);
+        } else {
+            response.status_code = 404;
+            response.status_msg = "User-Agent header not found".to_string();
         }
-        else {
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "User-Agent header not found"));
-        }
-
     }
 
-    response.push_str("\r\n");
-    response.push_str(body.as_str());
+    // Set Content-Length header
+    let content_length = response.body.len();
+    response.headers.insert("Content-Length".to_string(), content_length.to_string());
 
-    stream.write_all(response.as_bytes())?;
-    Ok(())
+    response
 }
 
+
+fn handle_tcp_stream_connect(tcp_stream: &mut TcpStream) -> Result<(), std::io::Error>{
+    println!(
+        "Accepted new connection from TCP connection with socket address {}",
+         tcp_stream.peer_addr()?
+    );
+
+    let mut request: HTTPRequest = HTTPRequest::new();
+
+    // Parse the incoming HTTP request
+    if let Err(e) = request.parse_request(tcp_stream) {
+        eprintln!("Error parsing request: {}", e);
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+    }
+
+    // Let the server elaborate a response for the request
+    let response = http_server_response(&request);
+    let response_string = response.to_string();
+
+    // Write the response to the TCP connection (Stream)
+    if let Err(e) = tcp_stream.write_all(response_string.as_bytes()) {
+        eprintln!("Error sending the response: {}", e);
+        return Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, e));
+    }
+
+    Ok(())
+}
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                println!("Accepted new connection");
-                let mut request = HTTPRequest::new();
+                // Multithreaded solution 
+                thread::spawn(move || {
+                    if let Err(e) = handle_tcp_stream_connect(&mut stream) {
+                        eprintln!("Error handling connection: {}", e);
+                    }
+                });
 
-                // Parse the incoming HTTP request
-                if let Err(e) = request.parse_request(&mut stream) {
-                    eprintln!("Error parsing request: {}", e);
-                    continue; // Skip to the next connection
-                }
-
-                // Elaborate an write a response for the request
-                if let Err(e) = write_response(&request, &mut stream) {
-                    eprintln!("Error writing the response: {}", e);
-                    continue;
-                }
             }
             Err(e) => {
                 eprintln!("Error accepting connection: {}", e);
