@@ -6,8 +6,6 @@ use std::thread;
 use std::fs;
 use std::env;
 
-use itertools::Itertools;
-
 enum HTTPMethod {
     GET, 
     POST, 
@@ -19,6 +17,25 @@ enum ContentType {
     PLAIN,
     JSON,
     OCTET,
+}
+
+enum EncodingScheme {
+    GZIP
+}
+
+impl EncodingScheme {
+    fn as_str(&self) -> &str {
+        match self {
+            EncodingScheme::GZIP => "gzip"
+        }
+    }
+
+    fn from_str(method: &str) -> Option<Self> {
+        match method {
+            "gzip" => Some(EncodingScheme::GZIP),
+            _ => None, 
+        }
+    }
 }
 
 impl HTTPMethod {
@@ -191,6 +208,22 @@ impl HTTPRequest {
     }
 }
 
+fn handle_encoding(request: &HTTPRequest, response: &mut HTTPResponse) {
+    if let Some(encoding_schemes) = request.headers.get("Accept-Encoding") {
+        let encodings: Vec<&str> = encoding_schemes
+        .split(',')
+        .map(|s| s.trim())
+        .collect();
+
+        if encodings.iter().any(|&e| e == EncodingScheme::GZIP.as_str()) {
+            response.headers.insert(
+                "Content-Encoding".to_string(),
+                EncodingScheme::GZIP.as_str().to_string()
+            );
+        }
+    }
+}
+
 // This function encapsulates the behaviour of the HTTP server
 fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
     // By default this will be the default response
@@ -312,6 +345,8 @@ fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
             }
         }    
     }
+
+    handle_encoding(&request, &mut response);
 
     // Set Content-Length header
     let content_length = response.body.len();
