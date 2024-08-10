@@ -1,7 +1,12 @@
 use std::net::{TcpListener, TcpStream};
 use std::io::{Write, BufRead, BufReader, Read};
 use std::collections::HashMap;
+
 use std::thread;
+use std::fs;
+use std::env;
+
+use itertools::Itertools;
 
 enum HTTPMethod {
     GET, 
@@ -13,6 +18,7 @@ enum HTTPMethod {
 enum ContentType {
     PLAIN,
     JSON,
+    OCTET,
 }
 
 impl HTTPMethod {
@@ -41,6 +47,7 @@ impl ContentType {
         match self {
             ContentType::PLAIN => "text/plain",
             ContentType::JSON => "application/json",
+            ContentType::OCTET => "application/octet-stream",
         }
     }
 
@@ -48,6 +55,7 @@ impl ContentType {
         match content_type {
             "text/plain" => Some(ContentType::PLAIN),
             "application/json" => Some(ContentType::JSON),
+            "application/octet-stream" => Some(ContentType::OCTET),
             _ => None
         }
     }
@@ -76,7 +84,12 @@ impl HTTPResponse {
     }
 
     fn to_string(self) -> String {
-        let mut response = format!("{} {} {}\r\n", self.version, self.status_code, self.status_msg);
+        let mut response = format!(
+            "{} {} {}\r\n",
+            self.version,
+            self.status_code,
+            self.status_msg
+        );
 
         for (key, value) in self.headers {
             response.push_str(&format!("{}: {}\r\n", key, value));
@@ -186,11 +199,14 @@ fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
     let path = request.path.as_str();
     let is_echo_endpoint: bool = path.starts_with("/echo");
     let is_agent_endpoint: bool = path.starts_with("/user-agent");
+    let is_file_endpoint: bool = path.starts_with("/files");
 
+    //Give default values to endpoints
     let (status_code, status_msg) = match path { 
         "/" => (200, "OK"),
         _ if is_echo_endpoint => (200, "OK"),
         _ if is_agent_endpoint => (200, "OK"),
+        _ if is_file_endpoint => (200, "OK"),
         _ => (404, "Not Found"),
     };
 
@@ -202,12 +218,18 @@ fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
 
     if is_echo_endpoint {
         response.content_type = ContentType::PLAIN;
-        response.headers.insert("Content-Type".to_string(), response.content_type.as_str().to_string());
+        response.headers.insert(
+            "Content-Type".to_string(),
+             response.content_type.as_str().to_string()
+        );
         response.body.push_str(path.trim_start_matches("/echo/"));
     } 
     else if is_agent_endpoint {
         response.content_type = ContentType::PLAIN;
-        response.headers.insert("Content-Type".to_string(), response.content_type.as_str().to_string());
+        response.headers.insert(
+            "Content-Type".to_string(),
+            response.content_type.as_str().to_string()
+        );
 
         if let Some(user_agent) = request.headers.get("User-Agent") {
             response.body.push_str(user_agent);
@@ -216,11 +238,54 @@ fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
             response.status_msg = "User-Agent header not found".to_string();
         }
     }
+    else if is_file_endpoint {
+        // Extract the file name from the path
+        let file_name = path.trim_start_matches("/files/");
+    
+        // Collect command line arguments and build the absolute path to the file
+        let env_args: Vec<String> = env::args().collect();
+        let directory = env_args.get(2).unwrap_or(&String::from(".")).clone();
+        let file_path = format!("{}/{}", directory, file_name);
+        let file_result = fs::read(&file_path);
+    
+        let response_body = match file_result {
+            Ok(file_content) => match String::from_utf8(file_content) {
+                Ok(content) => {
+                    response.content_type = ContentType::OCTET;
+                    response.headers.insert(
+                        "Content-Type".to_string(),
+                        response.content_type.as_str().to_string(),
+                    );
+                    content
+                }
+                Err(e) => {
+                    eprintln!("Error converting file content to String: {}", e);
+                    response.status_code = 500;
+                    response.status_msg = "Internal Server Error".to_string();
+                    //Graceful error message
+                    //"Error: Could not read file content as UTF-8".to_string()
+                    "".to_string()
+                }
+            },
+            Err(e) => {
+                eprintln!("Error reading file: {}", e);
+                response.status_code = 404;
+                response.status_msg = "Not Found".to_string();
+                //Graceful error message
+                //"Error: File not found".to_string()
+                "".to_string()
+            }
+        };
+    
+        response.body = response_body;
+    }
 
     // Set Content-Length header
     let content_length = response.body.len();
-    response.headers.insert("Content-Length".to_string(), content_length.to_string());
-
+    response.headers.insert(
+        "Content-Length".to_string(),
+        content_length.to_string()
+    );
     response
 }
 
@@ -251,6 +316,7 @@ fn handle_tcp_stream_connect(tcp_stream: &mut TcpStream) -> Result<(), std::io::
 
     Ok(())
 }
+
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
     for stream in listener.incoming() {
