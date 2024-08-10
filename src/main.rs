@@ -167,8 +167,8 @@ impl HTTPRequest {
         }
 
         // Read the optional body
-        if let Some(_length_str) = self.headers.get("Content-Length") {
-            /*
+        if let Some(length_str) = self.headers.get("Content-Length") {
+            
             let length: usize = match length_str.parse() {
                 Ok(len) => len,
                 Err(e) => return Err(format!("Error parsing Content-Length: {}", e)),
@@ -183,8 +183,6 @@ impl HTTPRequest {
                 Ok(body_str) => Some(body_str),
                 Err(e) => return Err(format!("Error parsing body as UTF-8: {}", e)),
             };
-            */
-            self.body = None;
         } else {
             self.body = None;
         }
@@ -241,43 +239,78 @@ fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
     else if is_file_endpoint {
         // Extract the file name from the path
         let file_name = path.trim_start_matches("/files/");
-    
         // Collect command line arguments and build the absolute path to the file
         let env_args: Vec<String> = env::args().collect();
         let directory = env_args.get(2).unwrap_or(&String::from(".")).clone();
         let file_path = format!("{}/{}", directory, file_name);
-        let file_result = fs::read(&file_path);
-    
-        let response_body = match file_result {
-            Ok(file_content) => match String::from_utf8(file_content) {
-                Ok(content) => {
-                    response.content_type = ContentType::OCTET;
-                    response.headers.insert(
-                        "Content-Type".to_string(),
-                        response.content_type.as_str().to_string(),
-                    );
-                    content
+
+        match request.method {
+            //Overwrite by default
+            HTTPMethod::POST => {
+                match fs::File::create(&file_path) {
+                    Ok(mut file) => {
+                        let file_content = match &request.body {
+                            Some(body) => body.to_string(),
+                            None => "".to_string(),
+                        };
+                        
+                        //Write the file and check for any errors
+                        if let Err(e) = file.write_all(file_content.as_bytes()) {
+                            response.status_code = 500;
+                            response.status_msg = "Internal Server Error".to_string();
+                            response.body = format!("Failed to write to file: {}", e);
+
+                        }
+
+                        response.status_code = 201;
+                        response.status_msg = "Created".to_string();
+                    }
+                    Err(e) => {
+                        response.status_code = 500;
+                        response.status_msg = "Internal Server Error".to_string();
+                        response.body = format!("Error creating file: {}", e);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Error converting file content to String: {}", e);
-                    response.status_code = 500;
-                    response.status_msg = "Internal Server Error".to_string();
-                    //Graceful error message
-                    //"Error: Could not read file content as UTF-8".to_string()
-                    "".to_string()
-                }
-            },
-            Err(e) => {
-                eprintln!("Error reading file: {}", e);
-                response.status_code = 404;
-                response.status_msg = "Not Found".to_string();
-                //Graceful error message
-                //"Error: File not found".to_string()
-                "".to_string()
+
+
             }
-        };
-    
-        response.body = response_body;
+            HTTPMethod::GET => {
+                let response_body = match fs::read(&file_path) {
+                    Ok(file_content) => match String::from_utf8(file_content) {
+                        Ok(content) => {
+                            response.content_type = ContentType::OCTET;
+                            response.headers.insert(
+                                "Content-Type".to_string(),
+                                response.content_type.as_str().to_string(),
+                            );
+                            content
+                        }
+                        Err(e) => {
+                            eprintln!("Error converting file content to String: {}", e);
+                            response.status_code = 500;
+                            response.status_msg = "Internal Server Error".to_string();
+                            //Graceful error message
+                            //"Error: Could not read file content as UTF-8".to_string()
+                            "".to_string()
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Error reading file: {}", e);
+                        response.status_code = 404;
+                        response.status_msg = "Not Found".to_string();
+                        //Graceful error message
+                        //"Error: File not found".to_string()
+                        "".to_string()
+                    }
+                };
+            
+                response.body = response_body;
+            }
+            _ => {
+                response.status_code = 405;
+                response.status_msg = "Method Not Allowed".to_string();
+            }
+        }    
     }
 
     // Set Content-Length header
