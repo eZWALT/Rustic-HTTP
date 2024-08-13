@@ -60,6 +60,7 @@ curl -v -H "Accept-Encoding: gzip" http://localhost:4221/user-agent
 - [ ] /status endpoint
 - [ ] /info endpoint
 - [ ] /list endpoint
+- [ ] Small refactor into multiple files
 
 
 
