@@ -2,6 +2,10 @@ use std::net::{TcpListener, TcpStream};
 use std::io::{Write, BufRead, BufReader, Read};
 use std::collections::HashMap;
 
+use flate2;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+
 use std::thread;
 use std::fs;
 use std::env;
@@ -85,6 +89,8 @@ struct HTTPResponse {
     status_msg: String, 
     headers: HashMap<String, String>,
     body: String,
+    encoded_body: Vec<u8>,
+    is_encoded: bool,
     content_type: ContentType
 }
 
@@ -96,24 +102,42 @@ impl HTTPResponse {
             status_msg,
             headers: HashMap::new(),
             body: String::new(),
+            is_encoded: false,
+            encoded_body: Vec::new(),
             content_type: ContentType::PLAIN,
         }
     }
 
-    fn to_string(self) -> String {
+    fn set_encoded_body(&mut self, encoded_data: Vec<u8>) {
+        self.encoded_body = encoded_data;
+        self.is_encoded = true;
+    }
+
+    fn set_body(&mut self, body: String) {
+        self.body = body;
+        self.is_encoded = false;
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
         let mut response = format!(
             "{} {} {}\r\n",
             self.version,
             self.status_code,
             self.status_msg
-        );
+        )
+        .into_bytes();
 
-        for (key, value) in self.headers {
-            response.push_str(&format!("{}: {}\r\n", key, value));
+        for (key, value) in &self.headers {
+            response.extend_from_slice(format!("{}: {}\r\n", key, value).as_bytes());
         }
 
-        response.push_str("\r\n");
-        response.push_str(&self.body);
+        response.extend_from_slice(b"\r\n");
+
+        if self.is_encoded {
+            response.extend_from_slice(&self.encoded_body);
+        } else {
+            response.extend_from_slice(self.body.as_bytes());
+        }
 
         response
     }
@@ -208,6 +232,7 @@ impl HTTPRequest {
     }
 }
 
+
 fn handle_encoding(request: &HTTPRequest, response: &mut HTTPResponse) {
     if let Some(encoding_schemes) = request.headers.get("Accept-Encoding") {
         let encodings: Vec<&str> = encoding_schemes
@@ -220,13 +245,18 @@ fn handle_encoding(request: &HTTPRequest, response: &mut HTTPResponse) {
                 "Content-Encoding".to_string(),
                 EncodingScheme::GZIP.as_str().to_string()
             );
+
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(response.body.as_bytes()).expect("Failed to compress the data!?");
+            let compressed_body = encoder.finish().expect("Failed to finish compression!?");
+
+            response.set_encoded_body(compressed_body);
         }
     }
 }
 
 // This function encapsulates the behaviour of the HTTP server
 fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
-    // By default this will be the default response
     let path = request.path.as_str();
     let is_echo_endpoint: bool = path.starts_with("/echo");
     let is_agent_endpoint: bool = path.starts_with("/user-agent");
@@ -253,7 +283,7 @@ fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
             "Content-Type".to_string(),
              response.content_type.as_str().to_string()
         );
-        response.body.push_str(path.trim_start_matches("/echo/"));
+        response.set_body(path.trim_start_matches("/echo/").to_string());
     } 
     else if is_agent_endpoint {
         response.content_type = ContentType::PLAIN;
@@ -263,7 +293,7 @@ fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
         );
 
         if let Some(user_agent) = request.headers.get("User-Agent") {
-            response.body.push_str(user_agent);
+            response.set_body(user_agent.to_string());
         } else {
             response.status_code = 404;
             response.status_msg = "User-Agent header not found".to_string();
@@ -291,8 +321,7 @@ fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
                         if let Err(e) = file.write_all(file_content.as_bytes()) {
                             response.status_code = 500;
                             response.status_msg = "Internal Server Error".to_string();
-                            response.body = format!("Failed to write to file: {}", e);
-
+                            response.set_body(format!("Failed to write to file: {}", e));
                         }
 
                         response.status_code = 201;
@@ -301,11 +330,9 @@ fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
                     Err(e) => {
                         response.status_code = 500;
                         response.status_msg = "Internal Server Error".to_string();
-                        response.body = format!("Error creating file: {}", e);
+                        response.set_body(format!("Error creating file: {}", e));
                     }
                 }
-
-
             }
             HTTPMethod::GET => {
                 let response_body = match fs::read(&file_path) {
@@ -323,7 +350,6 @@ fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
                             response.status_code = 500;
                             response.status_msg = "Internal Server Error".to_string();
                             //Graceful error message
-                            //"Error: Could not read file content as UTF-8".to_string()
                             "".to_string()
                         }
                     },
@@ -331,13 +357,11 @@ fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
                         eprintln!("Error reading file: {}", e);
                         response.status_code = 404;
                         response.status_msg = "Not Found".to_string();
-                        //Graceful error message
-                        //"Error: File not found".to_string()
                         "".to_string()
                     }
                 };
             
-                response.body = response_body;
+                response.set_body(response_body);
             }
             _ => {
                 response.status_code = 405;
@@ -349,11 +373,17 @@ fn http_server_response(request: &HTTPRequest) -> HTTPResponse {
     handle_encoding(&request, &mut response);
 
     // Set Content-Length header
-    let content_length = response.body.len();
+    let content_length = if response.is_encoded {
+        response.encoded_body.len()
+    } else {
+        response.body.len()
+    };
+
     response.headers.insert(
         "Content-Length".to_string(),
         content_length.to_string()
     );
+
     response
 }
 
@@ -374,10 +404,10 @@ fn handle_tcp_stream_connect(tcp_stream: &mut TcpStream) -> Result<(), std::io::
 
     // Let the server elaborate a response for the request
     let response = http_server_response(&request);
-    let response_string = response.to_string();
+    let response_vec = response.to_vec();
 
     // Write the response to the TCP connection (Stream)
-    if let Err(e) = tcp_stream.write_all(response_string.as_bytes()) {
+    if let Err(e) = tcp_stream.write_all(&response_vec) {
         eprintln!("Error sending the response: {}", e);
         return Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, e));
     }
